@@ -66,8 +66,19 @@ const ALLOWED_AUDIOVISUAL_FORMATS = new Set(['TV', 'MOVIE', 'OVA', 'ONA', 'SPECI
 // Cache em memória para resolução instantânea (0ms) da árvore de franquia
 export const franchiseTreeMemoryCache = new Map<string, any>();
 
-// Tipos de relações válidas
-const VALID_RELATION_TYPES = new Set(['SEQUEL', 'PREQUEL', 'PARENT_STORY', 'SIDE_STORY', 'SPIN_OFF', 'ALTERNATIVE_SETTING', 'ALTERNATIVE_VERSION', 'SUMMARY']);
+// Tipos de relações canônicas válidas (estritamente linha principal de temporadas, prequels e sequels)
+const VALID_RELATION_TYPES = new Set(['SEQUEL', 'PREQUEL', 'PARENT_STORY', 'PARENT', 'SUMMARY']);
+
+// Tipos de relações estritamente proibidas (spin-offs, histórias paralelas e versões alternativas)
+const EXCLUDED_RELATION_TYPES = new Set([
+  'SIDE_STORY',
+  'SPIN_OFF',
+  'ALTERNATIVE',
+  'ALTERNATIVE_SETTING',
+  'ALTERNATIVE_VERSION',
+  'CHARACTER',
+  'OTHER',
+]);
 
 /**
  * Formata o título da temporada/filme de forma limpa em português a partir dos dados legítimos da API,
@@ -351,7 +362,19 @@ export async function fetchAnimeFranchiseTree(
       // Mapeamento em Grafo para agrupar e desduplicar
       const nodesMap = new Map<number, any>();
       const idsSet = new Set<number>();
+      const excludedNodeIds = new Set<number>();
       let detectedAiringDay: string | null = null;
+
+      // Pré-registro imediato de relações proibidas (spin-offs, side stories, alternatives) do nó principal
+      if (targetMedia && Array.isArray(targetMedia.relations?.edges)) {
+        targetMedia.relations.edges.forEach((edge: any) => {
+          const edgeType = (edge?.relationType || '').toUpperCase();
+          if (EXCLUDED_RELATION_TYPES.has(edgeType) && edge?.node) {
+            if (edge.node.idMal) excludedNodeIds.add(edge.node.idMal);
+            if (edge.node.id) excludedNodeIds.add(edge.node.id);
+          }
+        });
+      }
 
       // Função auxiliar para registrar nós válidos
       const processNode = (node: any, relationTypeHint?: string, isDirectRelation = false) => {
@@ -365,6 +388,17 @@ export async function fetchAnimeFranchiseTree(
 
         const malId = node.idMal || node.id;
         if (!malId) return;
+
+        // Se o nó foi identificado como spin-off, side-story ou alternative, descarta completamente
+        if (excludedNodeIds.has(malId) || (node.id && excludedNodeIds.has(node.id))) {
+          return;
+        }
+
+        if (relationTypeHint && EXCLUDED_RELATION_TYPES.has(relationTypeHint.toUpperCase())) {
+          excludedNodeIds.add(malId);
+          if (node.id) excludedNodeIds.add(node.id);
+          return;
+        }
 
         // Detecta dia de transmissão se a temporada estiver ativamente no ar (RELEASING)
         const isCurrentlyReleasing = node.status === 'RELEASING';
@@ -402,6 +436,17 @@ export async function fetchAnimeFranchiseTree(
         const titleCheck = `${bestTitle} ${english} ${node.title?.native || ''}`.toLowerCase();
         if (/(?:mugiwara\s*theater|mugiwara\s*gekijou|parody|paródia|chibi|yonkoma|omake|sd\s*chara|fan\s*letter|special\s*program)/i.test(titleCheck)) {
           return;
+        }
+
+        // Filtro contra spin-offs, side stories e alternatives no título (a menos que o termo de busca explícito do usuário contenha)
+        const isQueryAlternative = /alternative|spin-off|spin\s*off|side\s*story|gaiden/i.test(rawSearch);
+        if (!isQueryAlternative) {
+          if (/\b(?:spin[-_\s]*off|side[-_\s]*story|gaiden)\b/i.test(titleCheck) ||
+              /\b(?:alternative)\b/i.test(titleCheck)) {
+            excludedNodeIds.add(malId);
+            if (node.id) excludedNodeIds.add(node.id);
+            return;
+          }
         }
 
         // 2. Filtro de relevância de franquia para itens vindos de busca textual livre
@@ -453,13 +498,28 @@ export async function fetchAnimeFranchiseTree(
         if (!Array.isArray(edges)) return;
         edges.forEach((edge: any) => {
           const edgeType = (edge.relationType || '').toUpperCase();
+          if (EXCLUDED_RELATION_TYPES.has(edgeType) && edge.node) {
+            const excludedMalId = edge.node.idMal || edge.node.id;
+            if (excludedMalId) {
+              excludedNodeIds.add(excludedMalId);
+              nodesMap.delete(excludedMalId);
+            }
+            if (edge.node.id) {
+              excludedNodeIds.add(edge.node.id);
+              nodesMap.delete(edge.node.id);
+            }
+            return;
+          }
           if (VALID_RELATION_TYPES.has(edgeType) && edge.node) {
-            processNode(edge.node, edgeType.toLowerCase(), true);
             const targetMalId = edge.node.idMal || edge.node.id;
-            if (sourceMalId && targetMalId) {
+            if (targetMalId && excludedNodeIds.has(targetMalId)) return;
+            if (edge.node.id && excludedNodeIds.has(edge.node.id)) return;
+
+            processNode(edge.node, edgeType.toLowerCase(), true);
+            if (sourceMalId && targetMalId && !excludedNodeIds.has(targetMalId)) {
               addGraphEdge(sourceMalId, targetMalId);
             }
-            if (edge.node.id && !exploredAniListIds.has(edge.node.id)) {
+            if (edge.node.id && !exploredAniListIds.has(edge.node.id) && !excludedNodeIds.has(edge.node.id)) {
               pendingAniListIds.add(edge.node.id);
             }
           }
@@ -586,7 +646,9 @@ export async function fetchAnimeFranchiseTree(
         }
       }
 
-      const collectedList = Array.from(nodesMap.values());
+      const collectedList = Array.from(nodesMap.values()).filter(
+        (n) => !excludedNodeIds.has(n.id) && !(n.aniListId && excludedNodeIds.has(n.aniListId))
+      );
 
       if (collectedList.length > 0) {
         // Função canônica para extrair peso/indicador de temporada e parte (ex: Season 2 Part 1)

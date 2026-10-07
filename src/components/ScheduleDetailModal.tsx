@@ -147,15 +147,11 @@ export const ScheduleDetailModal: React.FC<ScheduleDetailModalProps> = ({
       nextEpisode: anime.nextEpisode || null,
     });
 
-    // 2. Extrai instantaneamente plataformas oficiais de streaming já presentes nos externalLinks do lote
+    // 2. Extrai instantaneamente plataformas oficiais de streaming já presentes nos externalLinks do lote (0ms)
     const batchStreams = extractBatchStreamingLinks((anime as any).externalLinks);
-    if (batchStreams.length > 0) {
-      setStreamingLinks(batchStreams);
-      setLoadingStreaming(false);
-    } else {
-      setStreamingLinks([]);
-      setLoadingStreaming(true);
-    }
+    setStreamingLinks(batchStreams);
+    // Nunca trava nem exibe spinner obstrutivo: a informação já veio no lote
+    setLoadingStreaming(false);
 
     setLoadingNews(true);
 
